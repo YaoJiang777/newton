@@ -485,6 +485,8 @@ class ModelBuilder:
         self.equality_constraint_key = []
         self.equality_constraint_enabled = []
 
+
+
     @property
     def up_vector(self) -> Vec3:
         """
@@ -1317,7 +1319,7 @@ class ModelBuilder:
             self.joint_qd.append(0.0)
             self.joint_f.append(0.0)
 
-        if joint_type == JointType.FREE or joint_type == JointType.DISTANCE or joint_type == JointType.BALL:
+        if joint_type == JointType.FREE or joint_type == JointType.DISTANCE or joint_type == JointType.BALL or joint_type == JointType.STIFFROD:
             # ensure that a valid quaternion is used for the angular dofs
             self.joint_q[-1] = 1.0
 
@@ -1741,6 +1743,29 @@ class ModelBuilder:
             collision_filter_parent=collision_filter_parent,
             enabled=enabled,
         )
+
+    def add_joint_stiffrod(
+        self,
+        parent: int,
+        child: int,
+        parent_xform: Transform | None = None,
+        child_xform: Transform | None = None,
+        key: str | None = None,
+        collision_filter_parent: bool = True,
+        enabled: bool = True,
+    ) -> int:
+        """Adds a stiff rod joint (distance + bending/twisting) between two bodies."""
+        return self.add_joint(
+            JointType.STIFFROD,
+            parent,
+            child,
+            parent_xform=parent_xform,
+            child_xform=child_xform,
+            key=key,
+            collision_filter_parent=collision_filter_parent,
+            enabled=enabled
+        )
+
 
     def add_equality_constraint(
         self,

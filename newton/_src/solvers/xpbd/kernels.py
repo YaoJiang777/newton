@@ -945,7 +945,7 @@ def apply_joint_forces(
     if type == JointType.FREE or type == JointType.DISTANCE:
         f_total = wp.vec3(joint_f[qd_start + 0], joint_f[qd_start + 1], joint_f[qd_start + 2])
         t_total = wp.vec3(joint_f[qd_start + 3], joint_f[qd_start + 4], joint_f[qd_start + 5])
-    elif type == JointType.BALL:
+    elif type == JointType.BALL or type == JointType.STIFFROD:
         t_total = wp.vec3(joint_f[qd_start + 0], joint_f[qd_start + 1], joint_f[qd_start + 2])
 
     elif type == JointType.REVOLUTE or type == JointType.PRISMATIC or type == JointType.D6:
@@ -1498,8 +1498,10 @@ def solve_body_joints(
     id_c = joint_child[tid]
     id_p = joint_parent[tid]
 
-    X_pj = joint_X_p[tid]
+    X_pj = joint_X_p[tid] 
     X_cj = joint_X_c[tid]
+    #joint frame 相对于 parent body 局部坐标 的变换
+    #X_cj: joint frame 相对于 child body 局部坐标 的变换
 
     X_wp = X_pj
     m_inv_p = 0.0
@@ -1510,13 +1512,13 @@ def solve_body_joints(
     omega_p = wp.vec3(0.0)
     # parent transform and moment arm
     if id_p >= 0:
-        pose_p = body_q[id_p]
-        X_wp = pose_p * X_wp
-        com_p = body_com[id_p]
-        m_inv_p = body_inv_m[id_p]
-        I_inv_p = body_inv_I[id_p]
-        vel_p = wp.spatial_top(body_qd[id_p])
-        omega_p = wp.spatial_bottom(body_qd[id_p])
+        pose_p = body_q[id_p] #parent 刚体的世界位姿 位置和方向
+        X_wp = pose_p * X_wp #parent joint frame 在世界空间下的姿态
+        com_p = body_com[id_p] #parent 刚体质心在其局部坐标中的位置
+        m_inv_p = body_inv_m[id_p]  #parent 质量的倒数
+        I_inv_p = body_inv_I[id_p] #parent 局部惯量张量的逆矩阵
+        vel_p = wp.spatial_top(body_qd[id_p]) # parent 线速度
+        omega_p = wp.spatial_bottom(body_qd[id_p]) # parent 角速度
 
     # child transform and moment arm
     pose_c = body_q[id_c]
@@ -1539,6 +1541,12 @@ def solve_body_joints(
 
     rel_pose = wp.transform_inverse(X_wp) * X_wc
     rel_p = wp.transform_get_translation(rel_pose)
+
+    # child joint frame 在 parent joint frame 下的位置误差。
+    # rel_pose: 从 parent joint 到 child joint 的相对变换；
+    # rel_p: 相对平移部分（anchor 间距） 
+
+    #这个rel_p是在parent的坐标下测量的，所以下面按dim loop分解的时候需要考虑这个坐标下分量。看linear_c是p的坐标向量，angular_c也同理考虑了该方向上的jacobian.
 
     # joint connection points
     # x_p = wp.transform_get_translation(X_wp)
@@ -1616,6 +1624,148 @@ def solve_body_joints(
             ang_delta_p += angular_p * (d_lambda * angular_relaxation)
             lin_delta_c += linear_c * (d_lambda * linear_relaxation)
             ang_delta_c += angular_c * (d_lambda * angular_relaxation)
+
+    elif type == JointType.STIFFROD:
+        # ---- Stretch constraint (distance) ----
+        stretch_err = rel_p #注：this rel_p in space R^3 is just the first 3 dimension of constraint in the paper
+        frame_p = wp.quat_to_matrix(wp.transform_get_rotation(X_wp))
+        r_p = x_c - world_com_p
+        r_c = x_c - wp.transform_point(pose_c, com_c)
+        for dim in range(3):
+            # 当前维度的误差（在 parent joint 坐标系下）
+            err = stretch_err[dim]
+            # 当前维度方向在世界坐标下
+            linear_c = wp.vec3(frame_p[0, dim], frame_p[1, dim], frame_p[2, dim])
+            linear_p = -linear_c
+
+            # 对应的角度梯度
+            angular_p = -wp.cross(r_p, linear_c)
+            angular_c = wp.cross(r_c, linear_c)
+
+            # 约束速度误差
+            derr = (
+                wp.dot(linear_p, vel_p)
+                + wp.dot(linear_c, vel_c)
+                + wp.dot(angular_p, omega_p)
+                + wp.dot(angular_c, omega_c)
+            )
+
+            # XPBD 参数
+            
+            compliance = 0.0      # 硬约束
+            damping = 0.0         # 无阻尼
+
+            if wp.abs(err) > 1e-9:
+                lambda_in = 0.0
+                # 单维度 XPBD 校正
+                d_lambda = compute_positional_correction(
+                    err,
+                    derr,
+                    pose_p,
+                    pose_c,
+                    m_inv_p,
+                    m_inv_c,
+                    I_inv_p,
+                    I_inv_c,
+                    linear_p,
+                    linear_c,
+                    angular_p,
+                    angular_c,
+                    lambda_in,
+                    compliance,
+                    damping,
+                    dt,
+                )
+
+                # 累积修正量
+                lin_delta_p += linear_p * (d_lambda * linear_relaxation)
+                ang_delta_p += angular_p * (d_lambda * angular_relaxation)
+                lin_delta_c += linear_c * (d_lambda * linear_relaxation)
+                ang_delta_c += angular_c * (d_lambda * angular_relaxation)
+
+        # ---- Bending / Twisting constraint ----
+        # 临时变量替代 q1_0_bar * q2_0
+        # 在global frame下去分解，所有不要再用parent frame为基底了
+        q_rest = wp.quat_identity()   # 即 (1,0,0,0)
+        q_p = wp.transform_get_rotation(X_wp)
+        q_c = wp.transform_get_rotation(X_wc)
+
+        dq = wp.quat_inverse(q_p) * q_c
+
+
+        dq_diff = dq - q_rest
+        x_pj = wp.transform_get_translation(X_pj)
+        x_cj = wp.transform_get_translation(X_cj)
+        l_i = wp.length(x_cj) + wp.length(x_pj)
+
+        err_Omega = (2.0 / l_i) * wp.vec3(dq_diff[0], dq_diff[1], dq_diff[2])  # vec3
+
+        # Compute G(q)
+        # q_p : wp.quat
+        re_qp = q_p[3]                               # float
+        im_qp = wp.vec3(q_p[0], q_p[1], q_p[2])          # wp.vec3
+        im_cross_qp = wp.skew(im_qp)                  # wp.mat33 叉积矩阵
+        # 按论文定义拼装 G(q)
+        G_top_p = -im_qp * 0.5                             # 1x3 行向量,但先不转置，后续用outer算外积
+        G_bottom_p = (re_qp * wp.identity(n=3, dtype=float) + im_cross_qp) * 0.5  # 3x3
+
+        re_qc = q_c[3]                               # float
+        im_qc = wp.vec3(q_c[0], q_c[1], q_c[2])          # wp.vec3
+        im_cross_qc = wp.skew(im_qc)                  # wp.mat33 叉积矩阵
+        # 按论文定义拼装 G(q)
+        G_top_c = -im_qc * 0.5                             # 1x3 行向量
+        G_bottom_c = (re_qc * wp.identity(n=3, dtype=float) + im_cross_qc) * 0.5  # 3x3
+        
+        # 实际用的时候我们只需要后面导数矩阵的下3行
+        # 所以可存储成 dict 或 tuple (G_top, G_bottom)
+
+        # 2. child derivative
+        re_p = q_p[3]                           # float
+        im_p = wp.vec3(q_p[0], q_p[1], q_p[2])  # vec3
+        cross_p = wp.skew(im_p)                 # mat33
+
+        dOmega_dq_c_left = -(2.0 / l_i) * im_p
+        dOmega_dq_c_right = (2.0 / l_i) * (re_p * wp.identity(n=3, dtype=float) - cross_p)  # mat33
+        # dOmega_dq_c = wp.mat44()
+        # [-im_p, dOmega_dq_c_right] #mat 3*4
+
+        # 3. parent derivative
+        re_c = q_c[3]
+        im_c = wp.vec3(q_c[0], q_c[1], q_c[2])
+        cross_c = wp.skew(im_c)
+        dOmega_dq_p_left = -(2.0 / l_i) * im_c
+        dOmega_dq_p_right = -(2.0 / l_i) * (re_c * wp.identity(n=3, dtype=float) - cross_c) # mat33
+        # dOmega_dq_p = [-im_c, dOmega_dq_p_right] #mat 3*4
+
+        dOmega_dq_p_G_p = wp.outer(dOmega_dq_p_left, G_top_p) + dOmega_dq_p_right * G_bottom_p #mat33
+        dOmega_dq_p_G_c = wp.outer(dOmega_dq_c_left, G_top_c) + dOmega_dq_c_right * G_bottom_c #mat33
+
+        bending_compliance = wp.vec3(0.0001, 0.0001, 0.0001) # Alpha and namely K is set here.
+        # bending_compliance = wp.vec3(10000.0, 10000.0, 100.0)
+
+
+
+        for dim in range(3):
+            err = err_Omega[dim]
+
+            if wp.abs(err) > 1e-9:
+                # 对应的角度梯度
+                angular_p = wp.vec3(dOmega_dq_p_G_p[0, dim], dOmega_dq_p_G_p[1, dim], dOmega_dq_p_G_p[2, dim])
+                angular_c = wp.vec3(dOmega_dq_p_G_c[0, dim], dOmega_dq_p_G_c[1, dim], dOmega_dq_p_G_c[2, dim])
+
+                # 约束速度误差
+                derr = 0.0
+                compliance = bending_compliance[dim]
+                d_lambda = (
+                    compute_angular_correction(
+                        err, derr, pose_p, pose_c, I_inv_p, I_inv_c, angular_p, angular_c, 0.0, compliance, damping, dt
+                    )
+                    * angular_relaxation
+                )
+
+                # update deltas
+                ang_delta_p += angular_p * d_lambda
+                ang_delta_c += angular_c * d_lambda
 
     else:
         # compute joint target, stiffness, damping
@@ -1833,6 +1983,7 @@ def solve_body_joints(
                 axis_mode = update_joint_dof_mode(mode, axis, axis_mode)
                 axis_target_ke_kd = update_joint_axis_target_ke_kd(axis, target, ke, kd, axis_target_ke_kd)
                 ke_sum += ke
+        # Yao: Revolute joint 只会走这一个if branch，然后达到的效果是设置了lower和upper，否则为0，会让算error的时候为严格有error。在设置这里之后，lower upper区间内e为0
         if ang_axis_count > 1:
             axis_idx = axis_start + lin_axis_count + 1
             axis = joint_axis[axis_idx]

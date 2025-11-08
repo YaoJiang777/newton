@@ -270,7 +270,7 @@ class SolverXPBD(SolverBase):
                         device=model.device,
                     )
 
-                self.integrate_bodies(model, state_in, state_out, dt, self.angular_damping)
+                self.integrate_bodies(model, state_in, state_out, dt, self.angular_damping) # Yao: this is predicting position and velocity.
 
             spring_constraint_lambdas = None
             if model.spring_count:
@@ -279,7 +279,7 @@ class SolverXPBD(SolverBase):
             if model.edge_count:
                 edge_constraint_lambdas = wp.empty_like(model.edge_rest_angle)
 
-            for i in range(self.iterations):
+            for i in range(self.iterations): # iterations for every time step
                 with wp.ScopedTimer(f"iteration_{i}", False):
                     if model.body_count:
                         if requires_grad and i > 0:
@@ -454,7 +454,7 @@ class SolverXPBD(SolverBase):
                         # )
 
                         wp.launch(
-                            kernel=solve_body_joints,
+                            kernel=solve_body_joints,   #这个是处理joint的关键。看一下不同类别怎么处理
                             dim=model.joint_count,
                             inputs=[
                                 body_q,
@@ -548,6 +548,8 @@ class SolverXPBD(SolverBase):
                             model, state_in, state_out, body_deltas, dt, rigid_contact_inv_weight
                         )
 
+            # Iteration ends, 后面写入新状态
+
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:
                     state_out.particle_q.assign(particle_q)
@@ -576,7 +578,7 @@ class SolverXPBD(SolverBase):
                     device=model.device,
                 )
 
-            if self.enable_restitution and contacts is not None:
+            if self.enable_restitution and contacts is not None: # 能量守恒，处理碰撞反弹的一些操作
                 if model.particle_count:
                     wp.launch(
                         kernel=apply_particle_shape_restitution,
