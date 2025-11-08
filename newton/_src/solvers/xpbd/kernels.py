@@ -945,7 +945,7 @@ def apply_joint_forces(
     if type == JointType.FREE or type == JointType.DISTANCE:
         f_total = wp.vec3(joint_f[qd_start + 0], joint_f[qd_start + 1], joint_f[qd_start + 2])
         t_total = wp.vec3(joint_f[qd_start + 3], joint_f[qd_start + 4], joint_f[qd_start + 5])
-    elif type == JointType.BALL or type == JointType.STIFFROD:
+    elif type == JointType.BALL or type == JointType.ROD_CONSTRAINT:
         t_total = wp.vec3(joint_f[qd_start + 0], joint_f[qd_start + 1], joint_f[qd_start + 2])
 
     elif type == JointType.REVOLUTE or type == JointType.PRISMATIC or type == JointType.D6:
@@ -1625,7 +1625,7 @@ def solve_body_joints(
             lin_delta_c += linear_c * (d_lambda * linear_relaxation)
             ang_delta_c += angular_c * (d_lambda * angular_relaxation)
 
-    elif type == JointType.STIFFROD:
+    elif type == JointType.ROD_CONSTRAINT:
         # ---- Stretch constraint (distance) ----
         stretch_err = rel_p #注：this rel_p in space R^3 is just the first 3 dimension of constraint in the paper
         frame_p = wp.quat_to_matrix(wp.transform_get_rotation(X_wp))

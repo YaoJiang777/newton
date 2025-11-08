@@ -54,7 +54,6 @@ from ..geometry import (
 )
 from ..geometry.inertia import validate_and_correct_inertia_kernel, verify_and_correct_inertia
 from ..geometry.utils import RemeshingMethod, compute_inertia_obb, remesh_mesh
-from ..utils import compute_world_offsets
 from .graph_coloring import ColoringAlgorithm, color_trimesh, combine_independent_particle_coloring
 from .joints import (
     EqType,
@@ -485,8 +484,6 @@ class ModelBuilder:
         self.equality_constraint_key = []
         self.equality_constraint_enabled = []
 
-
-
     @property
     def up_vector(self) -> Vec3:
         """
@@ -579,11 +576,50 @@ class ModelBuilder:
 
     # endregion
 
+    def _compute_replicate_offsets(self, num_worlds: int, spacing: tuple[float, float, float]):
+        # compute positional offsets per world
+        spacing = np.array(spacing, dtype=np.float32)
+        nonzeros = np.nonzero(spacing)[0]
+        num_dim = nonzeros.shape[0]
+        if num_dim > 0:
+            side_length = int(np.ceil(num_worlds ** (1.0 / num_dim)))
+            spacings = []
+            if num_dim == 1:
+                for i in range(num_worlds):
+                    spacings.append(i * spacing)
+            elif num_dim == 2:
+                for i in range(num_worlds):
+                    d0 = i // side_length
+                    d1 = i % side_length
+                    offset = np.zeros(3)
+                    offset[nonzeros[0]] = d0 * spacing[nonzeros[0]]
+                    offset[nonzeros[1]] = d1 * spacing[nonzeros[1]]
+                    spacings.append(offset)
+            elif num_dim == 3:
+                for i in range(num_worlds):
+                    d0 = i // (side_length * side_length)
+                    d1 = (i // side_length) % side_length
+                    d2 = i % side_length
+                    offset = np.zeros(3)
+                    offset[0] = d0 * spacing[0]
+                    offset[1] = d1 * spacing[1]
+                    offset[2] = d2 * spacing[2]
+                    spacings.append(offset)
+            spacings = np.array(spacings, dtype=np.float32)
+        else:
+            spacings = np.zeros((num_worlds, 3), dtype=np.float32)
+        min_offsets = np.min(spacings, axis=0)
+        correction = min_offsets + (np.max(spacings, axis=0) - min_offsets) / 2.0
+        # ensure the worlds are not shifted below the ground plane
+        correction[Axis.from_any(self.up_axis)] = 0.0
+        spacings -= correction
+        return spacings
+
     def replicate(
         self,
         builder: ModelBuilder,
         num_worlds: int,
-        spacing: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        spacing: tuple[float, float, float] = (5.0, 5.0, 0.0),
     ):
         """
         Replicates the given builder multiple times, offsetting each copy according to the supplied spacing.
@@ -592,19 +628,14 @@ class ModelBuilder:
         arranged in a regular grid or along a line. Each copy is offset in space by a multiple of the
         specified spacing vector, and all entities from each copy are assigned to a new world.
 
-        Note:
-            For visual separation of worlds, it is recommended to use the viewer's
-            `set_world_offsets()` method instead of physical spacing. This improves numerical
-            stability by keeping all worlds at the origin in the physics simulation.
-
         Args:
             builder (ModelBuilder): The builder to replicate. All entities from this builder will be copied.
             num_worlds (int): The number of worlds to create.
             spacing (tuple[float, float, float], optional): The spacing between each copy along each axis.
                 For example, (5.0, 5.0, 0.0) arranges copies in a 2D grid in the XY plane.
-                Defaults to (0.0, 0.0, 0.0).
+                Defaults to (5.0, 5.0, 0.0).
         """
-        offsets = compute_world_offsets(num_worlds, spacing, self.up_axis)
+        offsets = self._compute_replicate_offsets(num_worlds, spacing)
         xform = wp.transform_identity()
         for i in range(num_worlds):
             xform[:3] = offsets[i]
@@ -1319,7 +1350,7 @@ class ModelBuilder:
             self.joint_qd.append(0.0)
             self.joint_f.append(0.0)
 
-        if joint_type == JointType.FREE or joint_type == JointType.DISTANCE or joint_type == JointType.BALL or joint_type == JointType.STIFFROD:
+        if joint_type == JointType.FREE or joint_type == JointType.DISTANCE or joint_type == JointType.BALL or joint_type == JointType.ROD_CONSTRAINT:
             # ensure that a valid quaternion is used for the angular dofs
             self.joint_q[-1] = 1.0
 
@@ -1744,29 +1775,6 @@ class ModelBuilder:
             enabled=enabled,
         )
 
-    def add_joint_stiffrod(
-        self,
-        parent: int,
-        child: int,
-        parent_xform: Transform | None = None,
-        child_xform: Transform | None = None,
-        key: str | None = None,
-        collision_filter_parent: bool = True,
-        enabled: bool = True,
-    ) -> int:
-        """Adds a stiff rod joint (distance + bending/twisting) between two bodies."""
-        return self.add_joint(
-            JointType.STIFFROD,
-            parent,
-            child,
-            parent_xform=parent_xform,
-            child_xform=child_xform,
-            key=key,
-            collision_filter_parent=collision_filter_parent,
-            enabled=enabled
-        )
-
-
     def add_equality_constraint(
         self,
         constraint_type: Any,
@@ -1976,8 +1984,6 @@ class ModelBuilder:
                 return "sdf"
             if type == GeoType.PLANE:
                 return "plane"
-            if type == GeoType.CONVEX_MESH:
-                return "convex_hull"
             if type == GeoType.NONE:
                 return "none"
             return "unknown"
@@ -2790,41 +2796,6 @@ class ModelBuilder:
             key=key,
         )
 
-    def add_shape_convex_hull(
-        self,
-        body: int,
-        xform: Transform | None = None,
-        mesh: Mesh | None = None,
-        scale: Vec3 | None = None,
-        cfg: ShapeConfig | None = None,
-        key: str | None = None,
-    ) -> int:
-        """Adds a convex hull collision shape to a body.
-
-        Args:
-            body (int): The index of the parent body this shape belongs to. Use -1 for shapes not attached to any specific body.
-            xform (Transform | None): The transform of the convex hull in the parent body's local frame. If `None`, the identity transform `wp.transform()` is used. Defaults to `None`.
-            mesh (Mesh | None): The :class:`Mesh` object containing the vertex data for the convex hull. Defaults to `None`.
-            scale (Vec3 | None): The scale of the convex hull. Defaults to `None`, in which case the scale is `(1.0, 1.0, 1.0)`.
-            cfg (ShapeConfig | None): The configuration for the shape's physical and collision properties. If `None`, :attr:`default_shape_cfg` is used. Defaults to `None`.
-            key (str | None): An optional unique key for identifying the shape. If `None`, a default key is automatically generated. Defaults to `None`.
-
-        Returns:
-            int: The index of the newly added shape.
-        """
-
-        if cfg is None:
-            cfg = self.default_shape_cfg
-        return self.add_shape(
-            body=body,
-            type=GeoType.CONVEX_MESH,
-            xform=xform,
-            cfg=cfg,
-            scale=scale,
-            src=mesh,
-            key=key,
-        )
-
     def approximate_meshes(
         self,
         method: Literal["coacd", "vhacd", "bounding_sphere", "bounding_box"] | RemeshingMethod = "convex_hull",
@@ -2933,8 +2904,6 @@ class ModelBuilder:
                     self.shape_source[shape] = self.shape_source[shape].copy(
                         vertices=decomposition[0][0], indices=decomposition[0][1]
                     )
-                    # mark as convex mesh type
-                    self.shape_type[shape] = GeoType.CONVEX_MESH
                     if len(decomposition) > 1:
                         body = self.shape_body[shape]
                         xform = self.shape_transform[shape]
@@ -2953,14 +2922,13 @@ class ModelBuilder:
                         )
                         cfg.flags = self.shape_flags[shape]
                         for i in range(1, len(decomposition)):
-                            # add additional convex parts as convex meshes
-                            self.add_shape_convex_hull(
+                            self.add_shape_mesh(
                                 body=body,
                                 xform=xform,
-                                mesh=Mesh(decomposition[i][0], decomposition[i][1]),
-                                scale=scale,
                                 cfg=cfg,
+                                mesh=Mesh(decomposition[i][0], decomposition[i][1]),
                                 key=f"{self.shape_key[shape]}_convex_{i}",
+                                scale=scale,
                             )
                     remeshed_shapes.add(shape)
             except Exception as e:
@@ -3585,6 +3553,133 @@ class ModelBuilder:
                 self.particle_flags[start_vertex + vertex_id] = particle_flag
                 self.particle_mass[start_vertex + vertex_id] = particle_mass
                 vertex_id = vertex_id + 1
+
+    def add_rod_mesh(self,
+        pos: Vec3,
+        rot: Quat,
+        scale: float,
+        vel: Vec3,
+        vertices: list[Vec3],
+        indices: list[int],
+        density: float,
+        tri_ke: float | None = None,
+        tri_ka: float | None = None,
+        tri_kd: float | None = None,
+        tri_drag: float | None = None,
+        tri_lift: float | None = None,
+        edge_ke: float | None = None,
+        edge_kd: float | None = None,
+        add_springs: bool = False,
+        spring_ke: float | None = None,
+        spring_kd: float | None = None,
+        particle_radius: float | None = None,
+        
+        ):
+
+        """Helper to create a cloth model from a regular triangle mesh
+
+        Creates one FEM triangle element and one bending element for every face
+        and edge in the input triangle mesh
+
+        Args:
+            pos: The position of the cloth in world space
+            rot: The orientation of the cloth in world space
+            vel: The velocity of the cloth in world space
+            vertices: A list of vertex positions
+            indices: A list of triangle indices, 3 entries per-face
+            density: The density per-area of the mesh
+            edge_callback: A user callback when an edge is created
+            face_callback: A user callback when a face is created
+            particle_radius: The particle_radius which controls particle based collisions.
+        Note:
+
+            The mesh should be two manifold.
+        """
+
+        
+        tri_ke = tri_ke if tri_ke is not None else self.default_tri_ke
+        tri_ka = tri_ka if tri_ka is not None else self.default_tri_ka
+        tri_kd = tri_kd if tri_kd is not None else self.default_tri_kd
+        tri_drag = tri_drag if tri_drag is not None else self.default_tri_drag
+        tri_lift = tri_lift if tri_lift is not None else self.default_tri_lift
+        edge_ke = edge_ke if edge_ke is not None else self.default_edge_ke
+        edge_kd = edge_kd if edge_kd is not None else self.default_edge_kd
+        spring_ke = spring_ke if spring_ke is not None else self.default_spring_ke
+        spring_kd = spring_kd if spring_kd is not None else self.default_spring_kd
+        particle_radius = particle_radius if particle_radius is not None else self.default_particle_radius
+
+        num_verts = int(len(vertices))
+        num_tris = int(len(indices) / 3)
+
+        start_vertex = len(self.particle_q)
+        start_tri = len(self.tri_indices)
+
+        # particles
+        # for v in vertices:
+        #     p = wp.quat_rotate(rot, v * scale) + pos
+        #     self.add_particle(p, vel, 0.0, radius=particle_radius)
+        vertices_np = np.array(vertices) * scale
+        rot_mat_np = np.array(wp.quat_to_matrix(rot), dtype=np.float32).reshape(3, 3)
+        verts_3d_np = np.dot(vertices_np, rot_mat_np.T) + pos
+        self.add_particles(
+            verts_3d_np.tolist(), [vel] * num_verts, mass=[0.0] * num_verts, radius=[particle_radius] * num_verts
+        )
+
+        # triangles
+        inds = start_vertex + np.array(indices)
+        inds = inds.reshape(-1, 3)
+        areas = self.add_triangles(
+            inds[:, 0],
+            inds[:, 1],
+            inds[:, 2],
+            [tri_ke] * num_tris,
+            [tri_ka] * num_tris,
+            [tri_kd] * num_tris,
+            [tri_drag] * num_tris,
+            [tri_lift] * num_tris,
+        )
+        for t in range(num_tris):
+            area = areas[t]
+
+            self.particle_mass[inds[t, 0]] += density * area / 3.0
+            self.particle_mass[inds[t, 1]] += density * area / 3.0
+            self.particle_mass[inds[t, 2]] += density * area / 3.0
+
+        end_tri = len(self.tri_indices)
+
+        adj = wp.utils.MeshAdjacency(self.tri_indices[start_tri:end_tri], end_tri - start_tri)
+
+        edge_indices = np.fromiter(
+            (x for e in adj.edges.values() for x in (e.o0, e.o1, e.v0, e.v1)),
+            int,
+        ).reshape(-1, 4)
+        self.add_edges(
+            edge_indices[:, 0],
+            edge_indices[:, 1],
+            edge_indices[:, 2],
+            edge_indices[:, 3],
+            edge_ke=[edge_ke] * len(edge_indices),
+            edge_kd=[edge_kd] * len(edge_indices),
+        )
+
+        if add_springs:
+            spring_indices = set()
+            for i, j, k, l in edge_indices:
+                spring_indices.add((min(k, l), max(k, l)))
+                if i != -1:
+                    spring_indices.add((min(i, k), max(i, k)))
+                    spring_indices.add((min(i, l), max(i, l)))
+                if j != -1:
+                    spring_indices.add((min(j, k), max(j, k)))
+                    spring_indices.add((min(j, l), max(j, l)))
+                if i != -1 and j != -1:
+                    spring_indices.add((min(i, j), max(i, j)))
+
+            for i, j in spring_indices:
+                self.add_spring(i, j, spring_ke, spring_kd, control=0.0)
+
+
+
 
     def add_cloth_mesh(
         self,

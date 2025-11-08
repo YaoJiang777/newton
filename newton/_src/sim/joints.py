@@ -43,7 +43,7 @@ class JointType(IntEnum):
     D6 = 6
     """6-DoF joint: Generic joint with up to 3 translational and 3 rotational degrees of freedom."""
 
-    STIFFROD = 7
+    ROD_CONSTRAINT = 7
 
 
 def get_joint_dof_count(joint_type: int, num_axes: int) -> tuple[int, int]:
@@ -77,7 +77,7 @@ def get_joint_dof_count(joint_type: int, num_axes: int) -> tuple[int, int]:
     elif joint_type == JointType.FIXED:
         dof_count = 0
         coord_count = 0
-    elif joint_type == JointType.STIFFROD:
+    elif joint_type == JointType.ROD_CONSTRAINT:
         dof_count = 3
         coord_count = 4
     return dof_count, coord_count
