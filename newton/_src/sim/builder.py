@@ -1774,6 +1774,28 @@ class ModelBuilder:
             collision_filter_parent=collision_filter_parent,
             enabled=enabled,
         )
+    
+    def add_joint_stiffrod(
+        self,
+        parent: int,
+        child: int,
+        parent_xform: Transform | None = None,
+        child_xform: Transform | None = None,
+        key: str | None = None,
+        collision_filter_parent: bool = True,
+        enabled: bool = True,
+    ) -> int:
+        """Adds a stiff rod joint (distance + bending/twisting) between two bodies."""
+        return self.add_joint(
+            JointType.ROD_CONSTRAINT,
+            parent,
+            child,
+            parent_xform=parent_xform,
+            child_xform=child_xform,
+            key=key,
+            collision_filter_parent=collision_filter_parent,
+            enabled=enabled
+        )
 
     def add_equality_constraint(
         self,
