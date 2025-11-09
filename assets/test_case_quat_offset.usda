@@ -1,0 +1,100 @@
+#usda 1.0
+(
+
+    upAxis = "Z"
+    customLayerData = {
+        dictionary cameraSettings = {
+            dictionary Front = {
+                double3 position = (0, 0, 500)
+                double radius = 5
+            }
+            dictionary Perspective = {
+                double3 position = (3.100982353828142, 3.100982399154332, 3.100982353828143)
+                double3 target = (-3.978038209950796e-8, 7.95607677517296e-8, -3.978038121132954e-8)
+            }
+            dictionary Right = {
+                double3 position = (-500, 0, 0)
+                double radius = 5
+            }
+            dictionary Top = {
+                double3 position = (0, 500, 0)
+                double radius = 5
+            }
+            string boundCamera = "/OmniverseKit_Persp"
+        }
+        dictionary omni_layer = {
+            string authoring_layer = "./mutli_rod.usda"
+        }
+        dictionary renderSettings = {
+        }
+    }
+)
+
+def Xform "World"
+{
+
+
+    
+    def PhysicsScene "physics" (
+        prepend apiSchemas = ["PhysxSceneAPI"]
+    )
+    {
+        float3 physics:gravityDirection = (0, 0, -1)
+        float physics:gravityMagnitude = 0
+    }
+
+
+    def Xform "Seg0" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+        float physics:mass = 0.3
+        double3 xformOp:translate = (0., 0., 0.32)
+        double xformOp:rotateX = 1
+        uniform float4 newton:restQuat = (0, 0, 0, 1)
+        
+        uniform token[] xformOpOrder = ["xformOp:rotateX", "xformOp:translate"]
+
+        def Capsule "Geom" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            token axis = "Z"
+            double height = 0.18
+            double radius = 0.02
+        }
+    }
+
+    def Xform "Seg1" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+        float physics:mass = 0.3
+        double3 xformOp:translate = (0., 0., 0.5)
+        double xformOp:rotateX = 0
+        uniform float4 newton:restQuat = (0, 0, 0, 1)
+
+        uniform token[] xformOpOrder = ["xformOp:rotateX", "xformOp:translate"]
+
+        def Capsule "Geom" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            token axis = "Z"
+            double height = 0.18
+            double radius = 0.02
+            color3f[] primvars:displayColor = [(0.9, 0.6, 0.2)]
+        }
+    }
+
+
+    def RodConstraint "J_Seg0_Seg1" (
+        prepend apiSchemas = ["PhysxDistanceJointAPI"]  # optional but nice for PhysX extras
+    )
+    {
+        # Which bodies to connect
+        rel physics:body0 = </World/Seg0>
+        rel physics:body1 = </World/Seg1>
+    }
+
+}
